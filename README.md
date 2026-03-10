@@ -1,2 +1,297 @@
-# Contact-List-
-Repo for scraping contact lists using APIs
+import re
+import requests
+import pandas as pd
+import os
+
+# =========================
+# CONFIG
+# =========================
+# Your API key for Google Cloud services (Places API, Geocoding API)
+API_KEY = "AIzaSyCHZmjo-sks0w1O-yup3wNuN0NF_U3DJtc"
+
+# The target city and state for the geographic search
+TARGET_CITY_STATE = 'Meridian, MS'
+# The desired search radius in miles
+SEARCH_RADIUS_MILES = 50
+# Convert the search radius from miles to meters (1 mile = 1609.34 meters)
+SEARCH_RADIUS_METERS = SEARCH_RADIUS_MILES * 1609.34
+
+# The types of businesses we are looking for
+BUSINESS_TYPES = ['property manager', 'realtor', 'apartment']
+
+# The name of the output Excel file
+OUTPUT_FILE = "New_Meridian_Contacts.xlsx"
+
+# Map keywords in the query to short Type codes for categorization in the output
+TYPE_MAP = {
+    "property manager": "pm",
+    "realtor": "r",
+    "apartment": "apt",
+}
+
+# =========================
+# Helper: Google API Call Functions
+# =========================
+# Function to get geographical coordinates (latitude, longitude) for a given address
+def get_coordinates(address, api_key):
+    base_url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {
+        "address": address,
+        "key": api_key
+    }
+    response = requests.get(base_url, params=params)
+    data = response.json()
+
+    if data["status"] == "OK" and data["results"]:
+        location = data["results"][0]["geometry"]["location"]
+        return location["lat"], location["lng"]
+    else:
+        print(f"Error getting coordinates for {address}: {data['status']}")
+        return None, None
+
+# Function to perform a Google Places Text Search
+def search_places(query, location, radius, api_key):
+    url = (
+        "https://maps.googleapis.com/maps/api/place/textsearch/json"
+        f"?query={query}&location={location}&radius={radius}&key={api_key}"
+    )
+    r = requests.get(url, timeout=30)
+    r.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
+    return r.json().get("results", [])
+
+# Function to get detailed information for a specific place using its place_id
+def place_details(place_id, api_key):
+    url = (
+        "https://maps.googleapis.com/maps/api/place/details/json"
+        f"?place_id={place_id}&key={api_key}"
+    )
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    return r.json().get("result", {})
+
+# Function to infer the business type from the search query text
+def infer_type_from_query(query_text: str) -> str:
+    q = query_text.lower()
+    for k, v in TYPE_MAP.items():
+        if k in q:
+            return v
+    return ""  # returns empty string if type is unknown
+
+# =========================
+# RUN SCRAPING PROCESS
+# =========================
+results = []
+
+# Get coordinates for the target city (Meridian, MS)
+MERIDIAN_LAT, MERIDIAN_LNG = get_coordinates(TARGET_CITY_STATE, API_KEY)
+
+# Check if coordinates were successfully retrieved
+if MERIDIAN_LAT is None or MERIDIAN_LNG is None:
+    print(f"Could not get coordinates for {TARGET_CITY_STATE}. Exiting.")
+else:
+    print(f"Meridian Latitude: {MERIDIAN_LAT}")
+    print(f"Meridian Longitude: {MERIDIAN_LNG}")
+
+    # Iterate through each defined business type to perform searches
+    for business_type in BUSINESS_TYPES:
+        # Construct the search query for the Places API
+        query = f"{TARGET_CITY_STATE} {business_type}"
+        print(f"Searching for: {query}")
+
+        # Determine the short type code based on the business type
+        short_type = infer_type_from_query(business_type)
+
+        # Perform the geographically constrained text search
+        places = search_places(
+            query=query,
+            location=f"{MERIDIAN_LAT},{MERIDIAN_LNG}",
+            radius=SEARCH_RADIUS_METERS,
+            api_key=API_KEY
+        )
+
+        # Process each place found in the search results
+        for p in places:
+            place_id = p.get("place_id")
+            if not place_id:
+                continue # Skip if no place ID is available
+
+            # Get detailed information for the place
+            details = place_details(place_id, API_KEY)
+
+            address = details.get("formatted_address", "")
+            city = ""
+            state = ""
+            zip_code = ""
+
+            # Extract City, State, Zip from address_components for robust parsing
+            address_components = details.get("address_components", [])
+            for component in address_components:
+                types = component.get("types", [])
+                if "locality" in types:
+                    city = component.get("long_name")
+                elif "administrative_area_level_1" in types:
+                    state = component.get("short_name") # Use short name for state (e.g., MS)
+                elif "postal_code" in types:
+                    zip_code = component.get("long_name")
+
+            website_url = details.get("website")
+
+            # Construct a dictionary for the current business's data
+            row = {
+                "Type": short_type,
+                "Source": "Google",
+                "Organization": details.get("name"),
+                "Address": address,
+                "City": city,
+                "State": state,
+                "Zip": zip_code,
+                "Phone": details.get("formatted_phone_number"),
+                "Notes": "",
+                "Contact Name": "",
+                "Title": "",
+                "Website": website_url,
+                "Email": "",
+                "Rating": details.get("rating"),
+                "Query Source": query,
+            }
+
+            results.append(row) # Add the business data to the results list
+
+    print(f"Collected details for {len(results)} places.")
+
+# =========================
+# EXPORT TO EXCEL
+# =========================
+df = pd.DataFrame(results)
+
+# Define the desired order of columns for the output Excel file
+desired_cols = [
+    "Type","Source","Organization","Address","City","State","Zip","Phone",
+    "Notes","Contact Name","Title","Website","Email","Rating","Query Source"
+]
+# Reindex the DataFrame to match the desired column order
+df = df.reindex(columns=desired_cols)
+
+# Export the DataFrame to a new Excel file with conditional formatting
+writer = pd.ExcelWriter(OUTPUT_FILE, engine='xlsxwriter')
+df.to_excel(writer, sheet_name='Contacts', index=False)
+
+# Access the XlsxWriter workbook and worksheet objects from the dataframe.
+workbook  = writer.book
+worksheet = writer.sheets['Contacts']
+
+# No more Website Reachable column, so no conditional formatting for it.
+
+# Close the Pandas Excel writer and output the Excel file.
+writer.close()
+
+# Print a summary of the export process
+print("===================================")
+print(f"Done! Created {OUTPUT_FILE}")
+
+
+
+import socket
+import urllib.parse
+
+def check_dns_resolution(url):
+    if pd.isna(url) or not url:
+        return False
+    try:
+        # Ensure the URL has a scheme for correct parsing
+        if not urllib.parse.urlparse(url).scheme:
+            url = "http://" + url
+        hostname = urllib.parse.urlparse(url).netloc
+        if not hostname:
+            return False
+        socket.gethostbyname(hostname)
+        return True
+    except (socket.gaierror, AttributeError, ValueError):
+        return False
+
+# Apply the function to the 'Website' column
+df['DNS_Resolves'] = df['Website'].apply(check_dns_resolution)
+
+print("DNS resolution check completed. First 5 rows of 'DNS_Resolves' column:")
+print(df['DNS_Resolves'].head())
+
+
+
+# Keep all contacts. Prioritize all contacts by 'Rating' (descending order) and then 'Organization' (ascending order)
+filtered_df = df.sort_values(by=['Rating', 'Organization'], ascending=[False, True]).copy()
+
+print("Prioritized contacts (first 5 rows):")
+print(filtered_df.head())
+
+
+
+new_output_file = "Prioritized_Meridian_Contacts.xlsx"
+
+# Define the desired order of columns for the output Excel file
+desired_cols = [
+    "Type","Source","Organization","Address","City","State","Zip","Phone",
+    "Notes","Contact Name","Title","Website","Email","Rating","Query Source", "DNS_Resolves"
+]
+
+# Reindex the filtered DataFrame to match the desired column order
+filtered_df = filtered_df.reindex(columns=desired_cols)
+
+# Export the DataFrame to a new Excel file
+writer = pd.ExcelWriter(new_output_file, engine='xlsxwriter')
+filtered_df.to_excel(writer, sheet_name='Prioritized Contacts', index=False)
+
+# Access the XlsxWriter workbook and worksheet objects from the dataframe.
+workbook  = writer.book
+worksheet = writer.sheets['Prioritized Contacts']
+
+# Add a format for 'True' values (light green fill).
+green_format = workbook.add_format({'bg_color': '#C6EFCE'})
+# Add a format for 'False' values (light red fill).
+red_format = workbook.add_format({'bg_color': '#FFC7CE'})
+
+# Get the column index for 'DNS_Resolves'
+dns_resolves_col_idx = filtered_df.columns.get_loc('DNS_Resolves')
+
+# Helper function to convert column index to Excel column name
+def get_excel_column_name(col_idx):
+    name = ''
+    while col_idx >= 0:
+        name = chr(col_idx % 26 + ord('A')) + name
+        col_idx = col_idx // 26 - 1
+    return name
+
+excel_col_name = get_excel_column_name(dns_resolves_col_idx)
+cell_range = f'{excel_col_name}2:{excel_col_name}{len(filtered_df) + 1}' # +1 for 1-based indexing, +1 for header
+
+# Apply conditional formatting for 'True' values
+worksheet.conditional_format(cell_range, {
+    'type': 'cell',
+    'criteria': '==',
+    'value': True,
+    'format': green_format
+})
+
+# Apply conditional formatting for 'False' values
+worksheet.conditional_format(cell_range, {
+    'type': 'cell',
+    'criteria': '==',
+    'value': False,
+    'format': red_format
+})
+
+# Close the Pandas Excel writer and output the Excel file.
+writer.close()
+
+# Print a summary of the export process
+print("===================================")
+print(f"Done! Created {new_output_file}")
+print("Total rows:", len(filtered_df))
+print("File saved at:", os.path.abspath(new_output_file)) # Display the absolute path to the file
+print("===================================")
+
+
+
+
+print("Total rows:", len(df))
+print("File saved at:", os.path.abspath(OUTPUT_FILE)) # Display the absolute path to the file
+print("===================================")
