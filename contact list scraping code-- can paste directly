@@ -2,6 +2,8 @@ import re
 import requests
 import pandas as pd
 import os
+import socket
+import urllib.parse
 
 # =========================
 # CONFIG
@@ -80,7 +82,8 @@ def infer_type_from_query(query_text: str) -> str:
 # =========================
 # RUN SCRAPING PROCESS
 # =========================
-results = []
+all_raw_results = [] # Stores all initial search results
+deduplicated_results_map = {} # Stores unique entries after de-duplication
 
 # Get coordinates for the target city (Meridian, MS)
 MERIDIAN_LAT, MERIDIAN_LNG = get_coordinates(TARGET_CITY_STATE, API_KEY)
@@ -155,42 +158,37 @@ else:
                 "Query Source": query,
             }
 
-            results.append(row) # Add the business data to the results list
+            all_raw_results.append(row) # Add the business data to the raw results list
 
-    print(f"Collected details for {len(results)} places.")
+    # --- De-duplication and Type Aggregation ---    
+    for row in all_raw_results:
+        org = row.get('Organization')
+        addr = row.get('Address')
+        unique_key = (org, addr)
+
+        if unique_key in deduplicated_results_map:
+            # If duplicate, aggregate the 'Type' field
+            existing_entry = deduplicated_results_map[unique_key]
+            current_types = set(existing_entry['Type'].split('/'))
+            new_type = row.get('Type')
+            if new_type and new_type not in current_types:
+                current_types.add(new_type)
+            sorted_types = sorted(list(current_types))
+            existing_entry['Type'] = '/'.join(sorted_types)
+            deduplicated_results_map[unique_key] = existing_entry
+        else:
+            # If not a duplicate, add a copy of the row
+            deduplicated_results_map[unique_key] = row.copy() # Make a copy to avoid modifying original all_raw_results
+
+    results = list(deduplicated_results_map.values())
+
+    print(f"Collected details for {len(results)} deduplicated places.")
 
 # =========================
-# EXPORT TO EXCEL
+# CREATE DATAFRAME
 # =========================
 df = pd.DataFrame(results)
 
-# Define the desired order of columns for the output Excel file
-desired_cols = [
-    "Type","Source","Organization","Address","City","State","Zip","Phone",
-    "Notes","Contact Name","Title","Website","Email","Rating","Query Source"
-]
-# Reindex the DataFrame to match the desired column order
-df = df.reindex(columns=desired_cols)
-
-# Export the DataFrame to a new Excel file with conditional formatting
-writer = pd.ExcelWriter(OUTPUT_FILE, engine='xlsxwriter')
-df.to_excel(writer, sheet_name='Contacts', index=False)
-
-# Access the XlsxWriter workbook and worksheet objects from the dataframe.
-workbook  = writer.book
-worksheet = writer.sheets['Contacts']
-
-# No more Website Reachable column, so no conditional formatting for it.
-
-# Close the Pandas Excel writer and output the Excel file.
-writer.close()
-
-# Print a summary of the export process
-print("===================================")
-print(f"Done! Created {OUTPUT_FILE}")
-print("Total rows:", len(df))
-print("File saved at:", os.path.abspath(OUTPUT_FILE)) # Display the absolute path to the file
-print("===================================")
 
 
 import socket
@@ -218,11 +216,13 @@ print("DNS resolution check completed. First 5 rows of 'DNS_Resolves' column:")
 print(df['DNS_Resolves'].head())
 
 
-# Keep all contacts. Prioritize all contacts by 'Rating' (descending order) and then 'Organization' (ascending order)
+
 filtered_df = df.sort_values(by=['Rating', 'Organization'], ascending=[False, True]).copy()
 
 print("Prioritized contacts (first 5 rows):")
 print(filtered_df.head())
+
+
 
 
 new_output_file = "Prioritized_Meridian_Contacts.xlsx"
