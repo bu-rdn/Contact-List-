@@ -1,18 +1,17 @@
-import re
-import requests
-import pandas as pd
-import os
-import socket
-import urllib.parse
+# =========================
+# CONFIGURATION
+
+# You just need to fill out API_KEY and TARGET_CITY_STATE, then run it! 
 
 # =========================
-# CONFIG
-# =========================
+
 # Your API key for Google Cloud services (Places API, Geocoding API)
 API_KEY = "AIzaSyCHZmjo-sks0w1O-yup3wNuN0NF_U3DJtc"
-
 # The target city and state for the geographic search
 TARGET_CITY_STATE = 'Meridian, MS'
+
+
+
 # The desired search radius in miles
 SEARCH_RADIUS_MILES = 50
 # Convert the search radius from miles to meters (1 mile = 1609.34 meters)
@@ -21,8 +20,9 @@ SEARCH_RADIUS_METERS = SEARCH_RADIUS_MILES * 1609.34
 # The types of businesses we are looking for
 BUSINESS_TYPES = ['property manager', 'realtor', 'apartment']
 
-# The name of the output Excel file
-OUTPUT_FILE = "New_Meridian_Contacts.xlsx"
+# The name of the output Excel file-- ADJUST CITY NAME
+city_name_for_output = TARGET_CITY_STATE.split(',')[0].strip()
+OUTPUT_FILE = f"New_{city_name_for_output}_Contacts.xlsx"
 
 # Map keywords in the query to short Type codes for categorization in the output
 TYPE_MAP = {
@@ -30,6 +30,18 @@ TYPE_MAP = {
     "realtor": "r",
     "apartment": "apt",
 }
+
+
+import re
+import requests
+import pandas as pd
+import os
+import socket
+import urllib.parse
+import time # Import time for delays between API calls
+
+# The configuration variables are now defined in a separate, visible cell.
+# They will be loaded from the global scope.
 
 # =========================
 # Helper: Google API Call Functions
@@ -51,15 +63,33 @@ def get_coordinates(address, api_key):
         print(f"Error getting coordinates for {address}: {data['status']}")
         return None, None
 
-# Function to perform a Google Places Text Search
+# Function to perform a Google Places Text Search with pagination
 def search_places(query, location, radius, api_key):
-    url = (
-        "https://maps.googleapis.com/maps/api/place/textsearch/json"
-        f"?query={query}&location={location}&radius={radius}&key={api_key}"
-    )
-    r = requests.get(url, timeout=30)
-    r.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
-    return r.json().get("results", [])
+    all_places = []
+    next_page_token = None
+    
+    while True:
+        url = (
+            "https://maps.googleapis.com/maps/api/place/textsearch/json"
+            f"?query={query}&location={location}&radius={radius}&key={api_key}"
+        )
+        if next_page_token:
+            url += f"&pagetoken={next_page_token}"
+
+        r = requests.get(url, timeout=30)
+        r.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
+        data = r.json()
+        
+        all_places.extend(data.get("results", []))
+        next_page_token = data.get("next_page_token")
+        
+        if not next_page_token:
+            break
+        
+        # A short delay is required between paginated requests to avoid an INVALID_REQUEST error
+        time.sleep(2)
+        
+    return all_places
 
 # Function to get detailed information for a specific place using its place_id
 def place_details(place_id, api_key):
@@ -160,7 +190,7 @@ else:
 
             all_raw_results.append(row) # Add the business data to the raw results list
 
-    # --- De-duplication and Type Aggregation ---    
+    # --- De-duplication and Type Aggregation ---
     for row in all_raw_results:
         org = row.get('Organization')
         addr = row.get('Address')
@@ -191,6 +221,8 @@ df = pd.DataFrame(results)
 
 
 
+
+
 import socket
 import urllib.parse
 
@@ -217,6 +249,7 @@ print(df['DNS_Resolves'].head())
 
 
 
+
 filtered_df = df.sort_values(by=['Rating', 'Organization'], ascending=[False, True]).copy()
 
 print("Prioritized contacts (first 5 rows):")
@@ -225,7 +258,8 @@ print(filtered_df.head())
 
 
 
-new_output_file = "Prioritized_Meridian_Contacts.xlsx"
+city_name = TARGET_CITY_STATE.split(',')[0].strip()
+new_output_file = f"Prioritized_{city_name}_Contacts.xlsx"
 
 # Define the desired order of columns for the output Excel file
 desired_cols = [
